@@ -59,9 +59,9 @@ pub struct CLDLProof {
     u_vec: Vec<U1U2>,
 }
 
-pub struct Witness {
+pub struct Witness<'a> {
     pub r: BigInt,
-    pub x: BigInt,
+    pub x: &'a BigInt,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,10 +79,6 @@ pub struct U1U2 {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CLDLProofPublicSetup {
-    pub seed: BigInt,
-    pub pk: PK,
-    pub ciphertext: Ciphertext,
-    q: GE,
     t_triple: TTriplets,
     u1u2: U1U2,
 }
@@ -428,7 +424,7 @@ impl CLDLProof {
                 let k_slice_i = (k.clone() >> (i * C)) & ten.clone();
 
                 let u1 = r1_vec[i].clone() + &k_slice_i * &w.r;
-                let u2 = BigInt::mod_add(&r2_vec[i], &(&k_slice_i * &w.x), &FE::q());
+                let u2 = BigInt::mod_add(&r2_vec[i], &(&k_slice_i * w.x), &FE::q());
                 U1U2 { u1, u2 }
             })
             .collect::<Vec<U1U2>>();
@@ -507,7 +503,8 @@ impl CLDLProof {
 
 impl CLDLProofPublicSetup {
     // prove with public setup: same as above with C = 1,
-    pub fn prove(w: Witness, pk: PK, ciphertext: Ciphertext, q: GE, seed: BigInt) -> Self {
+    //TODO: HASH THE STATEMENT
+    pub fn prove(w: Witness, pk: &PK, _ciphertext: &Ciphertext, _q: &GE, _seed: &BigInt) -> Self {
         unsafe { pari_init(10000000, 2) };
 
         let r1 = BigInt::sample_below(
@@ -533,24 +530,23 @@ impl CLDLProofPublicSetup {
         let k = HSha256::create_hash(&[&fs]).mod_floor(&(BigInt::from(SECURITY_PARAMETER as u32)));
 
         let u1 = r1 + &k * &w.r;
-        let u2 = BigInt::mod_add(&r2, &(&k * &w.x), &FE::q());
+        let u2 = BigInt::mod_add(&r2, &(&k * w.x), &FE::q());
         let u1u2 = U1U2 { u1, u2 };
 
-        CLDLProofPublicSetup {
-            seed,
-            pk,
-            ciphertext,
-            q,
-            t_triple,
-            u1u2,
-        }
+        CLDLProofPublicSetup { t_triple, u1u2 }
     }
 
-    pub fn verify(&self) -> Result<(), ProofError> {
+    pub fn verify(
+        &self,
+        pk: &PK,
+        ciphertext: &Ciphertext,
+        q: &GE,
+        seed: &BigInt,
+    ) -> Result<(), ProofError> {
         unsafe { pari_init(10000000, 2) };
 
         let mut flag = true;
-        if HSMCL::setup_verify(&self.pk, &self.seed).is_err() {
+        if HSMCL::setup_verify(&pk, &seed).is_err() {
             flag = false;
         }
         let fs = HSha256::create_hash(&[
@@ -561,7 +557,7 @@ impl CLDLProofPublicSetup {
         // reconstruct k
         let k = HSha256::create_hash(&[&fs]).mod_floor(&(BigInt::from(SECURITY_PARAMETER as u32)));
 
-        let sample_size = &self.pk.stilde
+        let sample_size = &pk.stilde
             * (BigInt::from(2).pow(40))
             * BigInt::from(2).pow(SECURITY_PARAMETER as u32)
             * (BigInt::from(2).pow(40) + BigInt::one());
@@ -575,24 +571,24 @@ impl CLDLProofPublicSetup {
             flag = false;
         }
 
-        let c1k = self.ciphertext.c1.exp(&k);
+        let c1k = ciphertext.c1.exp(&k);
         let t1c1k = self.t_triple.t1.compose(&c1k).reduce();
-        let gqu1 = self.pk.gq.exp(&&self.u1u2.u1);
+        let gqu1 = pk.gq.exp(&&self.u1u2.u1);
         if t1c1k != gqu1 {
             flag = false;
         };
 
         let k_bias_fe: FE = ECScalar::from(&(k.clone() + BigInt::one()));
         let g = GE::generator();
-        let t2kq = (self.t_triple.T + self.q.clone() * k_bias_fe).sub_point(&self.q.get_element());
+        let t2kq = (self.t_triple.T + q.clone() * k_bias_fe).sub_point(&q.get_element());
         let u2p = &g * &ECScalar::from(&self.u1u2.u2);
         if t2kq != u2p {
             flag = false;
         }
 
-        let pku1 = self.pk.h.exp(&self.u1u2.u1);
-        let fu2 = BinaryQF::expo_f(&self.pk.q, &self.pk.delta_q, &self.u1u2.u2);
-        let c2k = self.ciphertext.c2.exp(&k);
+        let pku1 = pk.h.exp(&self.u1u2.u1);
+        let fu2 = BinaryQF::expo_f(&pk.q, &pk.delta_q, &self.u1u2.u2);
+        let c2k = ciphertext.c2.exp(&k);
         let t2c2k = self.t_triple.t2.compose(&c2k).reduce();
         let pku1fu2 = pku1.compose(&fu2).reduce();
         if t2c2k != pku1fu2 {
@@ -867,8 +863,6 @@ mod tests {
         let m_tag = BinaryQF::discrete_log_f(&hsmcl.pk.q, &hsmcl.pk.delta_q, &exp_f);
         assert_eq!(m.clone(), m_tag);
     }
-
-
 
     #[test]
     fn test_setup() {
