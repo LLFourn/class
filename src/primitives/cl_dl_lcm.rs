@@ -38,7 +38,7 @@ pub struct PK {
     pub stilde: BigInt,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Ciphertext {
     pub c1: BinaryQF,
     pub c2: BinaryQF,
