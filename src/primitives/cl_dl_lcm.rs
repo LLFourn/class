@@ -503,8 +503,7 @@ impl CLDLProof {
 
 impl CLDLProofPublicSetup {
     // prove with public setup: same as above with C = 1,
-    //TODO: HASH THE STATEMENT
-    pub fn prove(w: Witness, pk: &PK, _ciphertext: &Ciphertext, _q: &GE) -> Self {
+    pub fn prove(w: Witness, pk: &PK, ciphertext: &Ciphertext, Q: &GE) -> Self {
         unsafe { pari_init(10000000, 2) };
 
         let r1 = BigInt::sample_below(
@@ -520,14 +519,9 @@ impl CLDLProofPublicSetup {
         let t2 = fr2.compose(&pkr1).reduce();
         let T = GE::generator() * r2_fe;
         let t1 = pk.gq.exp(&r1);
-        let fs = HSha256::create_hash(&[
-            &BigInt::from(&t1.to_bytes()[..]),
-            &BigInt::from(&t2.to_bytes()[..]),
-            &T.bytes_compressed_to_big_int(),
-        ]);
         let t_triple = TTriplets { t1, t2, T };
-        // using Fiat Shamir transform. taking security-param bits //TODO: double check
-        let k = HSha256::create_hash(&[&fs]).mod_floor(&(BigInt::from(SECURITY_PARAMETER as u32)));
+
+        let k = Self::challenge(pk, &t_triple, ciphertext, Q);
 
         let u1 = r1 + &k * &w.r;
         let u2 = BigInt::mod_add(&r2, &(&k * w.x), &FE::q());
@@ -536,11 +530,30 @@ impl CLDLProofPublicSetup {
         CLDLProofPublicSetup { t_triple, u1u2 }
     }
 
+    /// Compute the Fiat-Shamir challenge for the proof.
+    fn challenge(pk: &PK, t: &TTriplets, ciphertext: &Ciphertext, Q: &GE) -> BigInt {
+        use crate::curv::arithmetic::traits::Converter;
+        let hash256 = HSha256::create_hash(&[
+            // hash the statement i.e. the discrete log of Q is encrypted in (c1,c2) under encryption key h.
+            &Q.bytes_compressed_to_big_int(),
+            &BigInt::from(ciphertext.c1.to_bytes().as_ref()),
+            &BigInt::from(ciphertext.c2.to_bytes().as_ref()),
+            &BigInt::from(pk.h.to_bytes().as_ref()),
+            // hash Sigma protocol commitments
+            &BigInt::from(t.t1.to_bytes().as_ref()),
+            &BigInt::from(t.t2.to_bytes().as_ref()),
+            &t.T.bytes_compressed_to_big_int(),
+        ]);
+
+        let hash128 = &BigInt::to_vec(&hash256)[..SECURITY_PARAMETER / 8];
+        BigInt::from(hash128)
+    }
+
     pub fn verify(
         &self,
         pk: &PK,
         ciphertext: &Ciphertext,
-        q: &GE,
+        Q: &GE,
         seed: &BigInt,
     ) -> Result<(), ProofError> {
         unsafe { pari_init(10000000, 2) };
@@ -549,13 +562,9 @@ impl CLDLProofPublicSetup {
         if HSMCL::setup_verify(&pk, &seed).is_err() {
             flag = false;
         }
-        let fs = HSha256::create_hash(&[
-            &BigInt::from(&self.t_triple.t1.to_bytes()[..]),
-            &BigInt::from(&self.t_triple.t2.to_bytes()[..]),
-            &self.t_triple.T.bytes_compressed_to_big_int(),
-        ]);
+
         // reconstruct k
-        let k = HSha256::create_hash(&[&fs]).mod_floor(&(BigInt::from(SECURITY_PARAMETER as u32)));
+        let k = Self::challenge(pk, &self.t_triple, ciphertext, Q);
 
         let sample_size = &pk.stilde
             * (BigInt::from(2).pow(40))
@@ -580,7 +589,7 @@ impl CLDLProofPublicSetup {
 
         let k_bias_fe: FE = ECScalar::from(&(k.clone() + BigInt::one()));
         let g = GE::generator();
-        let t2kq = (self.t_triple.T + q.clone() * k_bias_fe).sub_point(&q.get_element());
+        let t2kq = (self.t_triple.T + Q.clone() * k_bias_fe).sub_point(&Q.get_element());
         let u2p = &g * &ECScalar::from(&self.u1u2.u2);
         if t2kq != u2p {
             flag = false;
@@ -728,7 +737,7 @@ mod tests {
         let m = BigInt::from(1000);
         let r = BigInt::sample_below(&(&hsmcl.pk.stilde * BigInt::from(2).pow(40)));
         let ciphertext = HSMCL::encrypt_predefined_randomness(&hsmcl.pk, &m, &r);
-        let witness = Witness { x: m.clone(), r };
+        let witness = Witness { x: &m, r };
         let m_fe: FE = ECScalar::from(&m);
         let q = GE::generator() * m_fe;
         let proof = CLDLProof::prove(witness, hsmcl.pk.clone(), ciphertext, q);
@@ -747,7 +756,7 @@ mod tests {
         let m = BigInt::from(1000);
         let r = BigInt::sample_below(&(&hsmcl.pk.stilde * BigInt::from(2).pow(40)));
         let ciphertext = HSMCL::encrypt_predefined_randomness(&hsmcl.pk, &m, &r);
-        let witness = Witness { x: m.clone(), r };
+        let witness = Witness { x: &m, r };
         let m_fe: FE = ECScalar::from(&(&m + &BigInt::one()));
         let q = GE::generator() * m_fe;
         let proof = CLDLProof::prove(witness, hsmcl.pk.clone(), ciphertext, q);
@@ -767,7 +776,7 @@ mod tests {
         let r = BigInt::sample_below(&(&hsmcl.pk.stilde * BigInt::from(2).pow(40)));
         let ciphertext = HSMCL::encrypt_predefined_randomness(&hsmcl.pk, &m, &r);
         let witness = Witness {
-            x: m.clone() + BigInt::one(),
+            x: &(&m + BigInt::one()),
             r,
         };
         let m_fe: FE = ECScalar::from(&(&m + &BigInt::one()));
@@ -792,12 +801,12 @@ mod tests {
         let m = BigInt::from(1000);
         let r = BigInt::sample_below(&(&hsmcl.pk.stilde * BigInt::from(2).pow(40)));
         let ciphertext = HSMCL::encrypt_predefined_randomness(&hsmcl.pk, &m, &r);
-        let witness = Witness { x: m.clone(), r };
+        let witness = Witness { x: &m, r };
         let m_fe: FE = ECScalar::from(&m);
-        let q = GE::generator() * m_fe;
-        let proof = CLDLProofPublicSetup::prove(witness, hsmcl.pk.clone(), ciphertext, q, seed);
+        let Q = GE::generator() * m_fe;
+        let proof = CLDLProofPublicSetup::prove(witness, &hsmcl.pk, &ciphertext, &Q);
         //verify:
-        assert!(proof.verify().is_ok());
+        assert!(proof.verify(&hsmcl.pk, &ciphertext, &Q, &seed).is_ok());
     }
 
     #[test]
@@ -817,14 +826,14 @@ mod tests {
         let r = BigInt::sample_below(&(&hsmcl.pk.stilde * BigInt::from(2).pow(40)));
         let ciphertext = HSMCL::encrypt_predefined_randomness(&hsmcl.pk, &m, &r);
         let witness = Witness {
-            x: m.clone() + BigInt::one(),
+            x: &(&m + BigInt::one()),
             r,
         };
         let m_fe: FE = ECScalar::from(&(&m + &BigInt::one()));
-        let q = GE::generator() * m_fe;
-        let proof = CLDLProofPublicSetup::prove(witness, hsmcl.pk.clone(), ciphertext, q, seed);
+        let Q = GE::generator() * m_fe;
+        let proof = CLDLProofPublicSetup::prove(witness, &hsmcl.pk, &ciphertext, &Q);
         //verify:
-        assert!(proof.verify().is_ok())
+        assert!(proof.verify(&hsmcl.pk, &ciphertext, &Q, &seed).is_ok())
     }
 
     #[test]
@@ -843,12 +852,12 @@ mod tests {
         let m = BigInt::from(1000);
         let r = BigInt::sample_below(&(&hsmcl.pk.stilde * BigInt::from(2).pow(40)));
         let ciphertext = HSMCL::encrypt_predefined_randomness(&hsmcl.pk, &m, &r);
-        let witness = Witness { x: m.clone(), r };
+        let witness = Witness { x: &m, r };
         let m_fe: FE = ECScalar::from(&(&m + &BigInt::one()));
-        let q = GE::generator() * m_fe;
-        let proof = CLDLProofPublicSetup::prove(witness, hsmcl.pk.clone(), ciphertext, q, seed);
+        let Q = GE::generator() * m_fe;
+        let proof = CLDLProofPublicSetup::prove(witness, &hsmcl.pk, &ciphertext, &Q);
         //verify:
-        assert!(proof.verify().is_ok())
+        assert!(proof.verify(&hsmcl.pk, &ciphertext, &Q, &seed).is_ok())
     }
 
     #[test]
@@ -861,7 +870,7 @@ mod tests {
         let m = BigInt::from(10000);
         let exp_f = BinaryQF::expo_f(&hsmcl.pk.q, &hsmcl.pk.delta_q, &m);
         let m_tag = BinaryQF::discrete_log_f(&hsmcl.pk.q, &hsmcl.pk.delta_q, &exp_f);
-        assert_eq!(m.clone(), m_tag);
+        assert_eq!(m, m_tag);
     }
 
     #[test]
