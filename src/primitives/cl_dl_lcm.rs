@@ -504,7 +504,7 @@ impl CLDLProof {
 impl CLDLProofPublicSetup {
     // prove with public setup: same as above with C = 1,
     //TODO: HASH THE STATEMENT
-    pub fn prove(w: Witness, pk: &PK, _ciphertext: &Ciphertext, _q: &GE, _seed: &BigInt) -> Self {
+    pub fn prove(w: Witness, pk: &PK, _ciphertext: &Ciphertext, _q: &GE) -> Self {
         unsafe { pari_init(10000000, 2) };
 
         let r1 = BigInt::sample_below(
