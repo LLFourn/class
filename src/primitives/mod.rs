@@ -1,3 +1,4 @@
+pub mod cl_dl;
 pub mod cl_dl_lcm;
 pub mod poe;
 pub mod polynomial_comm;
